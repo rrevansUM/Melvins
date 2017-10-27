@@ -1,0 +1,109 @@
+---
+title: "Flu Epi Curve HIVE"
+author: "Richard Evans"
+date: "March 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+```
+
+Load Lab Database
+```{r}
+setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE 1617 Epi Curve/")
+hive1617labs <- "Laboratory 1617.csv"
+hive1617labs <- read.csv(hive1617labs, stringsAsFactors = FALSE)
+```
+
+```{r}
+setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE 1617 Epi Curve/Functions/")
+source("nest_ifelse.R")
+
+colnames(hive1617labs) <- tolower(colnames(hive1617labs))
+
+lab.data <- hive1617labs %>%
+  filter(study == 2 & final_result != "" & !grepl("Rep", final_result)) %>%
+  select(specdt, age, final_result) %>%
+  mutate(specdt = as.Date(specdt, format = "%m/%d/%Y"),
+         agegrp = factor(ie(
+           i(age >= 65, "65+"),
+           i((age >= 50 & age <= 64), "50-64 yr"),
+           i((age >= 18 & age <= 49), "18-49 yr"),
+           e("0-17 yr")
+         )))
+
+library(scales)
+library(ggplot2)
+library(RColorBrewer)
+
+myCols <- brewer.pal(3, "Set1")
+
+lab.data %>%
+  ggplot(aes(x = specdt, fill = agegrp)) %>%
+  add(stat_bin(binwidth = 1.5, position = "identity")) %>%
+  add(scale_x_date(breaks = date_breaks(width = "1 week"))) %>%
+  add(scale_fill_manual(values = c(myCols[2], myCols[1], myCols[3]))) %>%
+  add(labs(x = "\n Study Week",
+           y = "# Influenza Positive \n",
+           title = "HIVE Study Participants, 2016-2017 Influenza Season",
+           subtitle = "n = 49 Laboratory Confirmed Cases")) %>%
+  add(theme_bw()) %>%
+  add(theme(axis.text.x = element_text(angle = 60, hjust = 1)))
+```
+
+With the epicurve.weeks function from epitools
+
+by Specimen Collection Date
+```{r}
+library(epitools)
+
+par(mar = c(7, 5, 2, 2) + 0.2)
+lab.curve <- epicurve.weeks(lab.data$specdt, strata = lab.data$agegrp,
+                            axisnames = FALSE,
+                            xlab = "",
+                            ylab = "# Influenza Positive",
+                            col = rev(myCols),
+                            legend.text = TRUE,
+                            args.legend = list(x = "topleft", bty = "n"),
+                            space = 1)
+text(lab.curve$xvals, 
+     par("usr")[3] - 0.25,
+     adj = 1, srt = 60, xpd = TRUE, labels = lab.curve$cstratum2, cex = 0.8)
+title(xlab = "Specimen Collection Date", line = 4)
+```
+
+By Onset Date
+
+```{r}
+lab.data.onset <- hive1617labs %>%
+  filter(study == 2 & final_result != "" & !grepl("Rep", final_result)) %>%
+  select(onsetdt, age, final_result) %>%
+  mutate(onsetdt = as.Date(onsetdt, format = "%m/%d/%Y"),
+         agegrp = factor(ie(
+           i(age >= 65, "65+"),
+           i((age >= 50 & age <= 64), "50-64 yr"),
+           i((age >= 18 & age <= 49), "18-49 yr"),
+           e("0-17 yr")
+         )))
+
+par(mar = c(7, 5, 2, 2) + 0.2)
+lab.curve.onset <- epicurve.weeks(lab.data.onset$onsetdt, strata = lab.data.onset$agegrp,
+                                  axisnames = FALSE,
+                                  xlab = "",
+                                  ylab = "# Influenza Positive",
+                                  col = rev(myCols),
+                                  legend.text = TRUE,
+                                  args.legend = list(x = "topleft", bty = "n"),
+                                  space = 1,
+                                  segments = TRUE)
+text(lab.curve.onset$xvals, 
+     par("usr")[3] - 0.25,
+     adj = 1, srt = 60, xpd = TRUE, labels = lab.curve.onset$cstratum2, cex = 0.8)
+title(xlab = "Onset Date", line = 4)
+```
