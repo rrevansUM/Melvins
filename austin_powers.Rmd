@@ -1,0 +1,858 @@
+---
+title: ""
+author: "Richard Evans"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::html_clean:
+    code_folding: hide
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+---
+
+```{r knitr_init, echo = FALSE, cache = FALSE, warning = FALSE, message = FALSE}
+library(knitr)
+library(kableExtra)
+library(rmdformats)
+library(tidyverse)
+library(magrittr)
+library(pwr)
+
+## Global options
+options(max.print = "75")
+opts_chunk$set(echo = TRUE,
+	             cache = TRUE,
+               prompt = FALSE,
+               tidy = FALSE,
+               comment = NA,
+               message = FALSE,
+               warning = FALSE)
+opts_knit$set(width = 85)
+```
+
+```{r, eval = TRUE, echo = FALSE}
+theme_trueMinimal <- function(base_size = 16, base_family = "") {
+    theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+        theme(axis.ticks = element_blank(), 
+              legend.background = element_blank(), 
+              legend.key = element_blank(), 
+              panel.background = element_blank(), 
+              strip.background = element_blank(), 
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              plot.background = element_blank(), 
+              axis.line = element_line(), 
+              axis.line.y = element_blank(),
+              complete = TRUE)
+}
+```
+
+# Rationale
+
+Simulating power for two experiments:
+
+* Serological Analyses
+    + Testing antibody titers between types of viral targets
+* Transmission Hazard Model
+    + Household membership transmission Cox PH model describing time to influenza infection
+
+# Experiment #1
+
+## Experimental Data
+
+```{r, warning = FALSE, message = FALSE}
+setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE Grant Application/Power 19OCT2017")
+exp <- read.csv("RESPONSE_21OCT2016.csv")
+```
+
+Examine data
+
+```{r}
+glimpse(exp)
+```
+
+```{r}
+titers <- exp %>% 
+  select(ends_with("PRE"), ends_with("POST"), -starts_with("NAI"))
+```
+
+There are `r length(unique(exp$enrollid))` subjects in the data set and the data set has `r nrow(exp)` rows, thus data are 1 row per subject
+
+```{r}
+exp %>%
+  select(starts_with("HAI"), -ends_with("FOLD"), -ends_with("VIR")) %>%
+  psych::describe() %>%
+  kable()
+```
+
+Brisbane and Massachussets represent influenza B while Texas and Hong Kong represent Influenza A.
+
+```{r, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 6}
+df <- exp %>%
+  select(starts_with("HAI"), -ends_with("FOLD"), -ends_with("VIR")) %>%
+  reshape2::melt() %>%
+  mutate(
+    loc = ifelse(grepl("TEX", variable), "Texas", ""),
+    loc = ifelse(grepl("HK", variable), "Hong Kong", loc),
+    loc = ifelse(grepl("BRIS", variable), "Brisbane", loc),
+    loc = ifelse(grepl("MASS", variable), "Massachussets", loc),
+    pre_post = ifelse(grepl("PRE", variable), "Pre", "Post")
+    )
+
+df %>%
+  ggplot(aes(x = value)) %>%
+  add(geom_histogram(aes(y = ..density.., fill = pre_post), 
+                     alpha = 0.7,
+                     position = "dodge")) %>%
+  add(geom_density(aes(y = ..density.., fill = pre_post),
+                   alpha = 0.5)) %>%
+  add(facet_wrap(~loc, ncol = 2)) %>%
+  add(theme_trueMinimal(16)) %>%
+  add(theme(legend.position = c(0.9, 0.9))) %>%
+  add(labs(
+    fill = "",
+    x = expression(paste(log[10], "(Titer)")),
+    y = "density \n"
+  ))
+```
+ 
+It will definitely be difficult to detect a difference between pre and post, it will probably be easy to tell the difference between 'locale' for any pre-post ratio or difference.
+
+We are more interested in differences in 'folds' between locales, so, the difference between Hong Kong and Texas folds and the difference in Brisbane and Massachussets folds.
+
+```{r, warning = FALSE, message = FALSE}
+folds <- exp %>% select(ends_with("FOLD"), -starts_with("NAI"))
+
+long_folds <- folds %>%
+  reshape2::melt() %>%
+  mutate(
+    loc = ifelse(grepl("TEX", variable), "Texas", ""),
+    loc = ifelse(grepl("HK", variable), "Hong Kong", loc),
+    loc = ifelse(grepl("BRIS", variable), "Brisbane", loc),
+    loc = ifelse(grepl("MASS", variable), "Massachussets", loc),
+    
+    genera = ifelse(grepl("TEX|HK", variable), "Flu A", "Flu B")
+  )
+  
+long_folds %>%
+  ggplot(aes(loc, value)) %>%
+  add(geom_boxplot()) %>%
+  add(geom_jitter(width = 0.2, alpha = 0.5)) %>%
+  add(facet_wrap(~genera, scales = "free_y", nrow = 2)) %>%
+  add(theme_trueMinimal()) %>%
+  add(coord_flip()) %>%
+  add(labs(
+    y = expression(paste(log[10](titer[post])/log[10](titer[pre]))),
+    x = "Type"
+  ))
+```
+
+## Alternative model
+
+We could use a mixed-model approach for pre-post titer levels:
+
+```{r, warning = FALSE, message = FALSE}
+pullApart <- function(df, loc) {
+  tmp <- df %>%
+    mutate(id = row_number()) %>%
+    select(id, contains(loc)) %>%
+    reshape2::melt(id.vars = "id") %>%
+    mutate(
+      variable = ifelse(grepl("PRE", variable), "Pre", "Post"),
+      loc = loc,
+      flu = ifelse(loc %in% c("TEX", "HK"), "Flu A", "Flu B")
+    ) %>%
+    arrange(id)
+  tmp
+}
+
+tex <- pullApart(titers, loc = "TEX")
+hk <- pullApart(titers, loc = "HK")
+bris <- pullApart(titers, loc = "BRIS")
+mass <- pullApart(titers, loc = "MASS")
+
+rbind(tex, hk, bris, mass) %>%
+  ggplot(aes(x = variable, y = value, group = loc)) %>% 
+  add(geom_point()) %>%
+  add(geom_smooth(aes(color = loc), method = "lm", se = FALSE)) %>%
+  add(facet_wrap(~flu)) %>%
+  add(theme_trueMinimal(16)) %>%
+  add(theme(legend.position = "right", legend.justification = "top")) %>%
+  add(labs(
+    color = "",
+    x = "Measurement Time",
+    y = expression(paste(log[10], "(Titer)"))
+  ))
+```
+
+two separate models, comparing growths of Texas vs.Hong Kong and Brisbane vs. Massachussets.
+
+## Power Calculation
+
+Simulating from the distribution of $log_{10}(titer)$ we will calculate fold differences and test them under varying scenarios.
+
+```{r}
+f <- function(x) cbind(mean(x), sd(x))
+tab <- t(sapply(folds, f))
+colnames(tab) <- c("Mean", "SD")
+tab
+```
+
+The fold change is the ratio of two values and it measures how much the titers have changed between *pre* and *post* measurements, e.g., if pre is 2.5 and post is 5, this is a two-fold increase in value.
+
+By taking the logarithm of the titers, the difference in the means of the logged data corresponds to their ratio in the original scale. Thus, if we are willing to assume that the logged data are normally distributed, we can use the two-sample t-test to perform hypothesis tests about the fold change. Derivations for the means in the power calculations:
+
+if $X = \ln(titer)$ ($titer = \exp(X)$), then the mean and variance is $\mu_X$ and $\sigma^2_X$, respectively. If $X \sim N(\mu, \sigma^2)$, then $titer \sim log-normal(\mu, \sigma^2)$ and the following is true:
+
+$$\mu_{titer} = \left(e^{\mu_x+\frac{\sigma^2_x}{2}}\right)$$
+$$\sigma^2_{titer} = \mu_{titer}^2 \left(\exp^{\sigma^2_x} - 1\right)$$
+
+For this formulation we use the coefficient of variation and the pooled standard deviation:
+
+$$COV_{titer} = \frac{\sqrt{\mu_{titer}^2 \left(e^{\sigma^2_x}-1\right)}}{\mu_{titer}} = \sqrt{e^{\sigma^2_x} - 1}$$
+Solving for $\sigma_X^2$, the standard deviation can be stated in terms of the coefficient of variation of Y,
+
+$$\sigma_x = \sqrt{\ln(COV_{titer}^2 + 1)}$$. 
+
+The mean of $X = \ln(titer)$ is
+
+$$\mu_X = \frac{\mu_{titer}}{\ln(COV_{titer}^2 + 1)}$$
+
+Power is calcualted in the transformed X scale.
+
+To calculate $COV_{titer}$, use $\sigma_x^2$ to estimate COV with $\sqrt{e^{\sigma_x^2} - 1}$
+
+### t-test
+
+```{r, echo = FALSE, eval = TRUE}
+# pooled sd
+sdpool <- function(x, y)
+  sqrt((sd(x, na.rm = TRUE) ^ 2 + sd(y, na.rm = TRUE) ^ 2) / 2)
+
+# coefficient of variation
+COV <- function(x, y) sqrt(exp(sdpool(x, y) ^ 2) - 1)
+
+# sigma
+sigma <- function(x, y) sqrt(log(COV(x, y) ^ 2 + 1))
+
+# effect size
+fc.effect <- function(x, y, fc1, fc2)
+  abs(log(fc1) - log(fc2)) / sigma(x, y)
+
+# effect size
+effect <- function(x, y, d) ((mean(x) - mean(y)) - d) / sdpool(x, y)
+
+# power simulator
+pwr.fold.simulator <- function(x, y, n) {
+  df <- data.frame(
+    effect.size = NA,
+    fold.change = seq(1.1, 2, by = 0.05),
+    power = NA,
+    n = n
+  )
+  
+  for (i in 1:nrow(df)) {
+    df$effect.size[i] <- fc.effect(x, y, 1.0, df$fold.change[i])
+    df$power[i] <- pwr.t.test(n = n,
+                              type = "paired",
+                              d = df[i, 1],
+                              sig.level = 0.05)$power
+  }
+  df
+}
+```
+
+The effect size is $|\ln(FC_0) - \ln(FC_a)| / \sigma_d$ where $\sigma_d = \sqrt{\ln(\sqrt{e^{\sigma_x^2} - 1})}$
+
+```{r, warning = FALSE, message = FALSE}
+sim.matA <- pwr.fold.simulator(folds$HAI_TEX_FOLD, folds$HAI_HK_FOLD, n = 150)
+
+kable(sim.matA)
+```
+
+```{r, message = FALSE, warning = FALSE}
+sim.matB <- pwr.fold.simulator(folds$HAI_B_BRIS_FOLD, folds$HAI_B_MASS_FOLD, n = 150)
+
+kable(sim.matB)
+```
+
+```{r, fig.width = 10, fig.height = 4}
+par(mfrow = c(1, 2))
+plot(sim.matA$fold.change, sim.matA$power, type = "b",
+     xlab = "Fold Change Difference", ylab = "Power",
+     main = "Influenza A - Texas vs. Hong Kong")
+text(1.425, 0.4, "FC = 1.31")
+segments(x0 = 0, x1 = 1.31, y0 = 0.8, y1 = 0.8, lty = 2)
+segments(x0 = 1.315, x1 = 1.315, y0 = 0, y1 = 0.8, lty = 2)
+
+plot(sim.matB$fold.change, sim.matB$power, type = "b",
+     xlab = "Fold Change Difference", ylab = "Power", 
+     main = "Influenza B - Brisbane vs. Massachussets")
+text(1.4, 0.4, "FC = 1.3")
+segments(x0 = 0, x1 = 1.3, y0 = 0.8, y1 = 0.8, lty = 2)
+segments(x0 = 1.3, x1 = 1.3, y0 = 0, y1 = 0.8, lty = 2)
+```
+
+```{r, echo = FALSE, eval = FALSE}
+# setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE Grant Application/Power 19OCT2017")
+# tiff("fold_change_pwr_plot.tiff",
+#      width = 10, height = 6, units = "in", res = 300)
+# par(mfrow = c(1, 2))
+# plot(sim.matA$fold.change, sim.matA$power, type = "b",
+#      xlab = "Fold Change Difference", ylab = "Power",
+#      main = "Influenza A - Texas vs. Hong Kong")
+# text(1.425, 0.4, "FC = 1.31")
+# segments(x0 = 0, x1 = 1.31, y0 = 0.8, y1 = 0.8, lty = 2)
+# segments(x0 = 1.315, x1 = 1.315, y0 = 0, y1 = 0.8, lty = 2)
+# 
+# plot(sim.matB$fold.change, sim.matB$power, type = "b",
+#      xlab = "Fold Change Difference", ylab = "Power", 
+#      main = "Influenza B - Brisbane vs. Massachussets")
+# text(1.4, 0.4, "FC = 1.3")
+# segments(x0 = 0, x1 = 1.3, y0 = 0.8, y1 = 0.8, lty = 2)
+# segments(x0 = 1.3, x1 = 1.3, y0 = 0, y1 = 0.8, lty = 2)
+# dev.off()
+```
+
+## Post Power
+
+How much power to detect a difference in means of post-titers for Hong Kong vs. Texas and Brisbane vs. Massachussets
+
+For a paired t-test in this setting, the null hypothesis is where the differences are $d$, some hypothesized value.
+
+$H_0: \mu_d = d$
+$H_a: \mu_d \ne d$
+
+where $\mu_{j} = \sum_{i=1}^n \ln(titer_{j, i}) / n$, $j \in \left\{Texas, Hong Kong\right\}$ or $j \in \left\{Massachussets, Brisbane\right\}$ and $i$ observations.
+
+```{r}
+sim.matA <- data.frame(
+  d = seq(-2, 3, by = 0.1),
+  effect.size = NA,
+  power = NA,
+  n = 150
+  )
+
+for(i in 1:nrow(sim.matA)) {
+  sim.matA$effect.size[i] <- effect(titers$HAI_TEX_POST, 
+                                    titers$HAI_HK_POST, 
+                                    d = sim.matA$d[i])
+  sim.matA$power[i] <- pwr.t.test(n = 150,
+                                  type = "paired",
+                                  d = sim.matA[i, 2],
+                                  sig.level = 0.05)$power
+}
+
+kable(head(sim.matA))
+```
+
+```{r}
+sim.matB <- data.frame(
+  d = seq(-2, 3, by = 0.1),
+  effect.size = NA,
+  power = NA,
+  n = 150
+  )
+
+for(i in 1:nrow(sim.matB)) {
+  sim.matB$effect.size[i] <- effect(titers$HAI_B_BRIS_POST, 
+                                    titers$HAI_B_MASS_POST, 
+                                    d = sim.matB$d[i])
+  sim.matB$power[i] <- pwr.t.test(n = 150,
+                                  type = "paired",
+                                  d = sim.matB[i, 2],
+                                  sig.level = 0.05)$power
+}
+
+kable(head(sim.matB))
+```
+
+```{r, fig.width = 10, fig.height = 6}
+par(mfrow = c(1, 2))
+plot(sim.matA$d, sim.matA$power, type = "l",
+     xlab = "Mean Post log(titer) Difference", ylab = "Power",
+     main = "Influenza A - Texas vs. Hong Kong")
+abline(h = 0.8, lty = 2)
+segments(x0 = 1.184913, x1 = 1.184913, y0 = 0, y1 = 0.8, lty = 2)
+text(0.0, 0.4, "d = 1.18")
+segments(x0 = 1.905874, x1 = 1.905874, y0 = 0, y1 = 0.8, lty = 2)
+text(2.6, 0.4, "d = 1.91")
+
+plot(sim.matB$d, sim.matB$power, type = "l",
+     xlab = "Mean Post log(titer) Difference", ylab = "Power", 
+     main = "Influenza B - Brisbane vs. Massachussets")
+abline(h = 0.8, lty = 2)
+segments(x0 = -0.6022516, x1 = -0.6022516, y0 = 0, y1 = 0.8, lty = 2)
+text(-1.5, 0.4, "d = -0.60")
+segments(x0 = 0.2093125, x1 = 0.2093125, y0 = 0, y1 = 0.8, lty = 2)
+text(1, 0.4, "d = 0.21")
+```
+
+So, we are sufficiently powered to detect small differences in the mean between 1.18 and 1.9 for Texas vs. Hong Kong and -0.6 and 0.2 for Brisbane vs. Massachussets
+
+```{r, echo = FALSE, eval = FALSE}
+# setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE Grant Application/Power 19OCT2017")
+# tiff("post_diff_pwr_plot.tiff",
+#      width = 10, height = 6, units = "in", res = 300)
+# par(mfrow = c(1, 2))
+# plot(sim.matA$d, sim.matA$power, type = "l",
+#      xlab = "Mean Post log(titer) Difference", ylab = "Power",
+#      main = "Influenza A - Texas vs. Hong Kong")
+# abline(h = 0.8, lty = 2)
+# segments(x0 = 1.184913, x1 = 1.184913, y0 = 0, y1 = 0.8, lty = 2)
+# text(0.0, 0.4, "d = 1.18")
+# segments(x0 = 1.905874, x1 = 1.905874, y0 = 0, y1 = 0.8, lty = 2)
+# text(2.6, 0.4, "d = 1.91")
+# 
+# plot(sim.matB$d, sim.matB$power, type = "l",
+#      xlab = "Mean Post log(titer) Difference", ylab = "Power",
+#      main = "Influenza B - Brisbane vs. Massachussets")
+# abline(h = 0.8, lty = 2)
+# segments(x0 = -0.6022516, x1 = -0.6022516, y0 = 0, y1 = 0.8, lty = 2)
+# text(-1.5, 0.4, "d = -0.60")
+# segments(x0 = 0.2093125, x1 = 0.2093125, y0 = 0, y1 = 0.8, lty = 2)
+# text(1, 0.4, "d = 0.21")
+# dev.off()
+```
+
+# Experiment #2
+
+```{r, warning = FALSE, message = FALSE}
+library(survival)
+library(GGally)
+```
+
+The inverse probability method for generating weibull distributed survival times assuming Weibull distributed event times:
+
+If $S(t|\bf{X})$ is the survival function (conditional on observed predictors $\textbf{X}$):
+
+$$S(t|\textbf{X}) = e^{-\lambda_0(t)e^{\textbf{X}'\beta}}$$
+
+and $T \sim Weibull(\alpha, \gamma \space| \space \textbf{X})$, $S(t|\textbf{X})=\exp(-\lambda\alpha\gamma t^{\gamma-1}\exp(X'\beta))$ and $U \sim uniform(0, 1)$
+
+Then, 
+
+$$T = S^{-1}\left(U|\textbf{X}\right) = \lambda_0(t)\left(\frac{-ln(U)}{e^{\textbf{X}'\beta}}\right)$$
+
+T has survival function $S\left(t|\textbf{X}\right)$.
+
+When $T \sim Weibull(\alpha, \gamma)$ with the baseline hazard (and inverse) of $\lambda_0(t) = \alpha t^\gamma \rightarrow \lambda^{-1}_0(t) = \left(\frac{t}{\alpha}\right)^{1/\gamma}$
+
+$$T = Weibull^{-1}(U|\textbf{X}) = \left( -\frac{ln(u)}{\alpha \exp(\textbf{X}'\beta)} \right)^{1/\gamma}$$
+
+The procedure below involves generating $T \sim Weibull(\alpha, \gamma|\textbf{X})$ given $\textbf{X}$ by sampling $U \sim U(0, 1)$ and calculating $t = S^{-1}(u \space | \space \textbf{X})$ where $u$ is an instance of $U$ ($U=u$). In the above, notice $T \sim Weibull\left( \alpha, \gamma\exp(\textbf{X}'\beta) \right)$
+
+For each simulation iteration we are going to simulate a cohort, simulate secondary infections from that cohort and estimate the hazard of secondary infections against covariate values, these being:
+
+* Covariates:
+    + $I(Vax = 1)$
+
+*for now*
+
+As this is a household cohort we will simulate the household structure for each generated cohort. 
+
+* Assumptions:
+    + 1200 enrolled individuals $\approx$ 240 Households
+    + 100 influenza positives
+    + 30% vaccine effectiveness (range 0% - 50%)
+    + 65% vaccinated
+
+## Household Cohort Simulation
+
+```{r}
+# n.hh: number of households in each study
+# max.hh.size: max household size
+# vax.prop: vaccination proportion
+
+genHHstruct <- function(n.hh, max.hh.size, vax.prop) {
+  # household size
+  hh <- data.frame(hhsize = floor(runif(n.hh, 3, max.hh.size))) %>%
+    mutate(hhid = row_number())
+  
+  # vaccination by household (assuming households vaccinate, not individuals) 
+  vaxed <- sample(hh$hhid, nrow(hh) * vax.prop, replace = FALSE)
+  vaxed <- data.frame(hhid = vaxed, vax = 1)
+  
+  # household membership
+  HH <- hh[rep(row.names(hh), hh$hhsize), 1:2] %>%
+    group_by(hhid) %>%
+    mutate(
+      hhseq = row_number(),
+      member = ifelse(hhseq %in% 1:2, "Parent", "Child")
+      ) %>%
+    ungroup() %>%
+    full_join(vaxed, by = "hhid") %>%
+    mutate(vax = ifelse(is.na(vax), 0, vax)) %>%
+    mutate(id = row_number())
+  HH
+}
+
+# n.hh: household size from genHHstruct()
+# max.hh.size: maximum household size from genHHstruct()
+# alpha: shape parameter for weibull flu attack rates
+# gamma: scale parameter for weibull flu attack rates
+# beta: vector of parameter estimates in cox PH covariate vector,
+#       correspond to columns in genHHstruct value (output)
+# VE: vaccine effectiveness estimate
+
+HHcoxSim <- function(study, n.hh, max.hh.size,
+                     alpha = 0.0015,
+                     gamma = 1,
+                     covariates = c("vax"),
+                     beta  = -0.3,
+                     VE = 0.20,
+                     vax.prop = 0.70) {
+  
+  results <- data.frame(
+    STUDY = 1:study,
+    LB = rep(NA, study),
+    HAZ = rep(NA, study),
+    UB = rep(NA, study),
+    PVAL = rep(NA, study),
+    SIG = rep(NA, study)
+    )
+  
+  pb <- txtProgressBar(min = 0, max = study, style = 3)
+  
+  for (i in 1:study) {
+    
+    # household structure
+    HH <- genHHstruct(n.hh, max.hh.size, vax.prop = vax.prop)
+  
+    # Weibull latent event times - index cases
+    u <- runif(n = nrow(HH))
+    X <- as.numeric(as.matrix(HH[, covariates]))
+    t <- as.numeric((-log(u) / (alpha * exp(X * beta))) ^ (1 / gamma))
+    time <- ifelse(t > 104, 104, t)
+    status <- ifelse(t < 104, 1, 0)
+    HH <- cbind(HH, time, status)
+    
+    # effect of vaccination
+    HH <- HH %>%
+      filter(status == 1) %>% 
+      select(id) %>%
+      sample_n(VE * nrow(.), replace = FALSE) %>%
+      mutate(VEC = 1) %>%
+      full_join(HH, by = "id") %>%
+      mutate(
+        VEC = ifelse(is.na(VEC), 0, 1),
+        time = ifelse(VEC == 1, 104, time),
+        status = ifelse(VEC == 1, 0, status)
+        )
+    
+    # weibull influenza attack rates - secondary cases
+    exposedHH <- HH %>%
+      filter(status == 1) %>%
+      distinct(hhid) %>%
+      mutate(exposed = 1) %>%
+      full_join(HH, by = "hhid") %>%
+      mutate(exposed = ifelse(is.na(exposed), 0, exposed)) %>%
+      filter(exposed == 1) %>%
+      select(-time, -status, -exposed)
+    
+    u <- runif(n = nrow(exposedHH))
+    X <- as.numeric(as.matrix(exposedHH[, covariates]))
+    t <- as.numeric((-log(u) / (alpha * exp(X * beta))) ^ (1 / gamma))
+    time <- ifelse(t > 104, 104, t)
+    status <- ifelse(t < 104, 1, 0)
+    exposedHH <- cbind(exposedHH, time, status)
+    
+    # model and collect
+    coxmod <- coxph(Surv(time, status) ~ vax, data = exposedHH)
+    ci <- c(
+      as.numeric(exp(confint(coxmod)))[1],
+      as.numeric(exp(coefficients(coxmod))),
+      as.numeric(exp(confint(coxmod)))[2]
+      )
+    pval <- summary(coxmod)$coefficients[5]
+    sig <- ifelse(pval <= 0.05, 1, 0)
+    study.summary <- c(i, ci, pval, sig)
+    results[i, ] <- study.summary
+  setTxtProgressBar(pb, i)
+  }
+  results
+}
+```
+
+```{r}
+study <- 1000; n.hh <- 240; max.hh.size <- 8
+studies <- HHcoxSim(study, n.hh, max.hh.size)
+
+sum(studies$SIG) / study
+```
+
+This scheme provides awful power
+
+## Alternative
+
+```{r, warning = FALSE, message = FALSE}
+setwd("S:/MartinEpi/Projects/BoV-Uganda/Graphs and Reports/HH-transmission-model-master_2/")
+formdat1 <- read.csv("2017-01-25simData1.csv")
+
+nrow(formdat1) # 1441 individuals
+length(unique(formdat1$hhID)) # 328 households
+hist(formdat1$ondate)
+
+test <- formdat1 %>% filter(!is.na(ondate))
+nrow(test)
+```
+
+58 infections in total. We want to assume a cohort of similar size with 100 primary infections.
+
+```{r, message = FALSE, warning = FALSE}
+test <- formdat1 %>%
+  mutate(
+    time = ifelse(!is.na(ondate), ondate, 104),
+    status = ifelse(!is.na(ondate), 1, 0)
+  )
+
+ggsurv(survfit(Surv(time, status) ~ 1, data = test))
+```
+
+we want our data to look like the above. And the below, stratified by vaccination status:
+
+```{r}
+ggsurv(survfit(Surv(time, status) ~ timevax, data = test))
+```
+
+```{r, echo = FALSE, eval = TRUE}
+survSim <- function(n = 150, nE = 30, nC = 80,
+                    beta = 0.3, 
+                    lambdaT = 500,
+                    vax.prop = 0.65, 
+                    shape = 1.1) {
+  
+  # data and covariate generation
+  vacc <- rbinom(n, 1, vax.prop)
+  t <- rweibull(n, shape = shape, scale = lambdaT * exp(beta * vacc))
+  time <- ifelse(t < 104, t, 104)
+  status <- ifelse(time < 104, 1, 0)
+  
+  dat <- data.frame(vacc = vacc, time = time, status = status)
+  dat$vacc <- ifelse(dat$vacc == 1, "C", "E")
+  
+  # simulation
+  hazards <- seq(from = 0.0, to = 3.0, by = 0.1)
+  powers <- rep(NA, length(hazards))
+  for(i in 1:length(hazards)) {
+    pct100 <- powerCT(Surv(time, status) ~ vacc,
+                      dat = dat,
+                      nE = nE,
+                      nC = nC,
+                      RR = hazards[i],
+                      alpha = 0.05)
+    powers[i] <- pct100$power
+  }
+  
+  power.mat <- data.frame(power = powers, hazard = hazards)
+  
+  p <- power.mat %>%
+    ggplot(aes(x = hazards, y = powers)) %>%
+    add(geom_line()) %>%
+    add(geom_hline(yintercept = 0.8, linetype = "dashed")) %>%
+    add(theme_minimal())
+  
+  list(power.mat = power.mat,
+       power80 = power.mat[power.mat$power >= 0.70 & power.mat$power <= 0.90, ],
+       plot = p)
+}
+```
+
+### 65% vaccinated, 1200 enrolled (780 E, 420 C)
+
+```{r}
+fluA <- survSim(nE = 780, nC = 420)
+```
+
+```{r}
+p1 <- fluA$plot %>%
+  add(geom_vline(xintercept = c(0.58, 1.59), color = "red")) %>%
+  add(labs(
+    title = "Power by Hazard Ratio from Cox Proportional Hazards Log-Rank Test",
+    subtitle = "Risk of Infection, Assuming 65% Vaccination, 1200 exposed",
+    x = "Proposed Hazard",
+    y = "Statistical Power",
+    caption = "Red Vertical Lines Indicate Hazards of 0.58 and 1.59
+               Dashed Horizontal Line Indicates 80% Power"
+  ))
+p1
+```
+
+Just the positive values.
+
+```{r}
+p2 <- fluA$power.mat %>%
+  filter(hazard >= 1.0) %>%
+  ggplot(aes(x = hazard, y = power)) %>%
+  add(geom_line()) %>%
+  add(geom_hline(yintercept = 0.8, linetype = "dashed")) %>%
+  add(geom_vline(xintercept = 1.59, color = "red")) %>%
+  add(theme_minimal()) %>%
+  add(labs(
+  title = "Power by Hazard Ratio from Cox Proportional Hazards Log-Rank Test",
+  subtitle = "Risk of Infection, Assuming 65% Vaccination, 1200 exposed",
+  x = "Proposed Hazard",
+  y = "Statistical Power",
+  caption = "Red Vertical Line Indicate Hazard of 1.59
+             Dashed Horizontal Line Indicates 80% Power"
+  ))
+p2
+```
+
+```{r, eval = FALSE, echo = FALSE}
+# setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE Grant Application/Power 19OCT2017")
+# tiff("cox_power_sym.tiff",
+#      width = 8, height = 6, units = "in", res = 300)
+# p1
+# dev.off()
+# 
+# tiff("cox_power_1sided.tiff",
+#      width = 8, height = 6, units = "in", res = 300)
+# p2
+# dev.off()
+```
+
+### 65% vaccinated, 200 exposed (70 E, 130 C)
+
+```{r}
+fluA_exposed <- survSim(nE = 130, nC = 70)
+```
+
+```{r}
+p1 <- fluA_exposed$plot %>%
+  add(geom_vline(xintercept = c(0.235, 2.6), color = "red")) %>%
+  add(labs(
+    title = "Power by Hazard Ratio from Cox Proportional Hazards Log-Rank Test",
+    subtitle = "Risk of Secondary Infection, Assuming 65% Vaccination, 200 exposed",
+    x = "Proposed Hazard",
+    y = "Statistical Power",
+    caption = "Red Vertical Lines Indicate Hazards of 0.23 and 2.60
+               Dashed Horizontal Line Indicates 80% Power"
+  ))
+p1
+```
+
+Just the positive values.
+
+```{r}
+p2 <- fluA_exposed$power.mat %>%
+  filter(hazard >= 1.0) %>%
+  ggplot(aes(x = hazard, y = power)) %>%
+  add(geom_line()) %>%
+  add(geom_hline(yintercept = 0.8, linetype = "dashed")) %>%
+  add(geom_vline(xintercept = 2.6, color = "red")) %>%
+  add(theme_minimal()) %>%
+  add(labs(
+  title = "Power by Hazard Ratio from Cox Proportional Hazards Log-Rank Test",
+  subtitle = "Risk of Secondary Infection, Assuming 65% Vaccination, 200 exposed",
+  x = "Proposed Hazard",
+  y = "Statistical Power",
+  caption = "Red Vertical Line Indicate Hazard of 2.60
+             Dashed Horizontal Line Indicates 80% Power"
+  ))
+p2
+```
+
+```{r, eval = FALSE, echo = FALSE}
+# setwd("S:/Monto_Ohmit/Rich Evans/Projects/HIVE/HIVE Grant Application/Power 19OCT2017")
+# tiff("cox_power_sym_exposed.tiff",
+#      width = 8, height = 6, units = "in", res = 300)
+# p1
+# dev.off()
+# 
+# tiff("cox_power_1sided_exposed.tiff",
+#      width = 8, height = 6, units = "in", res = 300)
+# p2
+# dev.off()
+```
+
+# Misc. Functions
+
+```{r, eval = FALSE, echo = TRUE}
+# pooled sd
+sdpool <- function(x, y)
+  sqrt((sd(x, na.rm = TRUE) ^ 2 + sd(y, na.rm = TRUE) ^ 2) / 2)
+
+# calculate effect size
+effect <- function(d, x, y) d / sdpool(x, y)
+
+# coefficient of variation
+sigma <- function(x) sqrt(exp(sd(x) ^ 2) - 1)
+
+# power simulator
+pwr.fold.simulator <- function(x, y, fc1, fc2) {
+  df <- data.frame(
+    effect.size = NA,
+    fold.change = seq(1.1, 2, by = 0.1),
+    power = NA,
+    n = 75
+  )
+  
+  for (i in 1:nrow(df)) {
+    df$effect.size[i] <- effect(x, y, 1.0, df$fold.change[i])
+    df$power[i] <- pwr.t.test(n = 75, d = df[i, 1], sig.level = 0.05)$power
+  }
+  df
+}
+
+# theme_bw/theme_minimal with very minimal plot additions
+theme_trueMinimal <- function(base_size = 16, base_family = "") {
+    theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+        theme(axis.ticks = element_blank(), 
+              legend.background = element_blank(), 
+              legend.key = element_blank(), 
+              panel.background = element_blank(), 
+              strip.background = element_blank(), 
+              panel.border = element_blank(),
+              panel.grid.major = element_blank(), 
+              panel.grid.minor = element_blank(),
+              plot.background = element_blank(), 
+              axis.line = element_line(), 
+              axis.line.y = element_blank(),
+              complete = TRUE)
+}
+
+survSim <- function(n = 150, nE = 30, nC = 80,
+                    beta = 0.3, 
+                    lambdaT = 500,
+                    vax.prop = 0.65, 
+                    shape = 1.1) {
+  
+  # data and covariate generation
+  vacc <- rbinom(n, 1, vax.prop)
+  t <- rweibull(n, shape = shape, scale = lambdaT * exp(beta * vacc))
+  time <- ifelse(t < 104, t, 104)
+  status <- ifelse(time < 104, 1, 0)
+  
+  dat <- data.frame(vacc = vacc, time = time, status = status)
+  dat$vacc <- ifelse(dat$vacc == 1, "C", "E")
+  
+  # simulation
+  hazards <- seq(from = 0.0, to = 3.0, by = 0.1)
+  powers <- rep(NA, length(hazards))
+  for(i in 1:length(hazards)) {
+    pct100 <- powerCT(Surv(time, status) ~ vacc,
+                      dat = dat,
+                      nE = nE,
+                      nC = nC,
+                      RR = hazards[i],
+                      alpha = 0.05)
+    powers[i] <- pct100$power
+  }
+  
+  power.mat <- data.frame(power = powers, hazard = hazards)
+  
+  p <- power.mat %>%
+    ggplot(aes(x = hazards, y = powers)) %>%
+    add(geom_line()) %>%
+    add(geom_hline(yintercept = 0.8, linetype = "dashed")) %>%
+    add(theme_minimal())
+  
+  list(power.mat = power.mat,
+       power80 = power.mat[power.mat$power >= 0.70 & power.mat$power <= 0.90, ],
+       plot = p)
+}
+```
